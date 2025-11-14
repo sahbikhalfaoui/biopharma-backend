@@ -11,10 +11,6 @@ const { OAuth2Client } = require('google-auth-library');
 const app = express();
 
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
 
 // CORS configuration
 app.use(cors({
@@ -26,7 +22,6 @@ app.use(cors({
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use('/uploads', express.static('uploads'));
 
 // Configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'votre-secret-jwt-tres-securise';
@@ -54,16 +49,25 @@ mongoose.connect(MONGODB_URI, {
 });
 
 // Configuration Multer pour upload d'images
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadsDir);
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + path.extname(file.originalname));
-  }
+// Cloudinary Configuration
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
+// Multer Storage with Cloudinary
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: {
+    folder: 'vitapharm',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+    transformation: [{ width: 1200, height: 1200, crop: 'limit' }]
+  }
+});
 const upload = multer({ 
   storage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
@@ -333,7 +337,7 @@ app.post('/api/categories', auth, adminAuth, upload.single('image'), async (req,
   try {
     const categoryData = req.body;
     if (req.file) {
-      categoryData.image = `/uploads/${req.file.filename}`;
+      categoryData.image = req.file.path;
     }
     
     const category = new Category(categoryData);
@@ -353,7 +357,7 @@ app.put('/api/categories/:id', auth, adminAuth, upload.single('image'), async (r
   try {
     const updateData = req.body;
     if (req.file) {
-      updateData.image = `/uploads/${req.file.filename}`;
+      updateData.image = req.file.path;
     }
     
     const category = await Category.findByIdAndUpdate(req.params.id, updateData, { new: true });
@@ -405,7 +409,7 @@ app.post('/api/subcategories', auth, adminAuth, upload.single('image'), async (r
   try {
     const subCategoryData = req.body;
     if (req.file) {
-      subCategoryData.image = `/uploads/${req.file.filename}`;
+      subCategoryData.image = req.file.path;
     }
     
     const subCategory = new SubCategory(subCategoryData);
@@ -422,7 +426,7 @@ app.put('/api/subcategories/:id', auth, adminAuth, upload.single('image'), async
   try {
     const updateData = req.body;
     if (req.file) {
-      updateData.image = `/uploads/${req.file.filename}`;
+      updateData.image = req.file.path;
     }
     
     const subCategory = await SubCategory.findByIdAndUpdate(req.params.id, updateData, { new: true });
@@ -518,8 +522,8 @@ app.post('/api/products', auth, adminAuth, upload.array('images', 5), async (req
     const productData = req.body;
     
     if (req.files && req.files.length > 0) {
-      productData.image = `/uploads/${req.files[0].filename}`;
-      productData.gallery = req.files.map(file => `/uploads/${file.filename}`);
+      productData.image = req.files[0].path; // Cloudinary URL
+      productData.gallery = req.files.map(file => file.path); // Cloudinary URLs
     }
     
     const product = new Product(productData);
@@ -537,8 +541,8 @@ app.put('/api/products/:id', auth, adminAuth, upload.array('images', 5), async (
     const updateData = req.body;
     
     if (req.files && req.files.length > 0) {
-      updateData.image = `/uploads/${req.files[0].filename}`;
-      updateData.gallery = req.files.map(file => `/uploads/${file.filename}`);
+      updateData.image = req.files[0].path; // Cloudinary URL
+      updateData.gallery = req.files.map(file => file.path); // Cloudinary URLs
     }
     
     const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
