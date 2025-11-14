@@ -14,8 +14,8 @@ const app = express();
 
 // CORS configuration
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
-  credentials: true,
+  origin: '*',
+  credentials: false, // Must be false when origin is '*'
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
