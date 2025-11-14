@@ -1027,7 +1027,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔗 Port: ${PORT}`);
   console.log(`🌐 URL: http://localhost:${PORT}`);
   console.log(`📡 API: http://localhost:${PORT}/api`);
-  console.log(`📁 Uploads: ${uploadsDir}`);
+
   console.log('==========================================\n');
   createDefaultAdmin();
 });
