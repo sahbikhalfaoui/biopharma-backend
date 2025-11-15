@@ -7,21 +7,39 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { OAuth2Client } = require('google-auth-library');
+const cloudinary = require('cloudinary').v2;
+const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const stream = require('stream');
 
 const app = express();
 
-// Create uploads directory if it doesn't exist
+// Cloudinary Configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'duh17omed',
+  api_key: process.env.CLOUDINARY_API_KEY || '584955548127624',
+  api_secret: process.env.CLOUDINARY_API_SECRET || 'HlW3Oe_dYYlM2ZNBXx2K8GDLNgg',
+  secure: true
+});
+
+// Create uploads directory if it doesn't exist (for temporary storage during migration)
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 
 // CORS configuration
 app.use(cors({
-  origin: '*',
-  credentials: false, // Must be false when origin is '*'
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Remove static uploads serving since we're using Cloudinary
+// app.use('/uploads', express.static('uploads'));
 
 // Configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'votre-secret-jwt-tres-securise';
@@ -34,42 +52,30 @@ app.get('/api/test', (req, res) => {
   res.json({ message: 'Server is running!', timestamp: new Date().toISOString() });
 });
 
-// Connexion MongoDB avec meilleure gestion d'erreur
-mongoose.connect(MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('✅ MongoDB connecté avec succès');
-  console.log('🔗 Database:', 'biopharma.jk3ygej.mongodb.net/vitapharm');
-})
-.catch(err => {
-  console.error('❌ Erreur connexion MongoDB:', err.message);
-  process.exit(1);
-});
-
-// Configuration Multer pour upload d'images
-// Cloudinary Configuration
-const cloudinary = require('cloudinary').v2;
-const { CloudinaryStorage } = require('multer-storage-cloudinary');
-
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-
-// Multer Storage with Cloudinary
-const storage = new CloudinaryStorage({
+// Cloudinary Storage Configuration for Multer
+const cloudinaryStorage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
     folder: 'vitapharm',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'gif', 'webp'],
-    transformation: [{ width: 1200, height: 1200, crop: 'limit' }]
-  }
+    format: async (req, file) => {
+      // Determine format based on mimetype
+      const format = file.mimetype.split('/')[1];
+      return format === 'jpeg' ? 'jpg' : format;
+    },
+    public_id: (req, file) => {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      return uniqueSuffix;
+    },
+    transformation: [
+      { width: 800, height: 600, crop: 'limit' },
+      { quality: 'auto' },
+      { format: 'auto' }
+    ]
+  },
 });
+
 const upload = multer({ 
-  storage,
+  storage: cloudinaryStorage,
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -80,7 +86,133 @@ const upload = multer({
   }
 });
 
-// Schémas MongoDB
+// Helper function to upload existing local images to Cloudinary
+const uploadLocalImageToCloudinary = async (localPath, folder = 'vitapharm') => {
+  try {
+    if (!fs.existsSync(path.join(__dirname, localPath))) {
+      console.log(`Local file not found: ${localPath}`);
+      return null;
+    }
+
+    const result = await cloudinary.uploader.upload(path.join(__dirname, localPath), {
+      folder: folder,
+      transformation: [
+        { width: 800, height: 600, crop: 'limit' },
+        { quality: 'auto' },
+        { format: 'auto' }
+      ]
+    });
+    
+    console.log(`Uploaded ${localPath} to Cloudinary: ${result.secure_url}`);
+    return result.secure_url;
+  } catch (error) {
+    console.error(`Error uploading ${localPath} to Cloudinary:`, error);
+    return null;
+  }
+};
+
+// Migration function for existing images
+const migrateExistingImages = async () => {
+  console.log('Starting image migration to Cloudinary...');
+  
+  try {
+    // Migrate Category images
+    const categories = await Category.find({ image: { $exists: true, $ne: null } });
+    console.log(`Found ${categories.length} categories with images to migrate`);
+    
+    for (const category of categories) {
+      if (category.image && category.image.startsWith('/uploads/')) {
+        const cloudinaryUrl = await uploadLocalImageToCloudinary(category.image, 'vitapharm/categories');
+        if (cloudinaryUrl) {
+          category.image = cloudinaryUrl;
+          await category.save();
+          console.log(`Migrated category image: ${category.name}`);
+        }
+      }
+    }
+
+    // Migrate SubCategory images
+    const subCategories = await SubCategory.find({ image: { $exists: true, $ne: null } });
+    console.log(`Found ${subCategories.length} subcategories with images to migrate`);
+    
+    for (const subCategory of subCategories) {
+      if (subCategory.image && subCategory.image.startsWith('/uploads/')) {
+        const cloudinaryUrl = await uploadLocalImageToCloudinary(subCategory.image, 'vitapharm/subcategories');
+        if (cloudinaryUrl) {
+          subCategory.image = cloudinaryUrl;
+          await subCategory.save();
+          console.log(`Migrated subcategory image: ${subCategory.name}`);
+        }
+      }
+    }
+
+    // Migrate Product images and galleries
+    const products = await Product.find({
+      $or: [
+        { image: { $exists: true, $ne: null } },
+        { gallery: { $exists: true, $ne: [] } }
+      ]
+    });
+    console.log(`Found ${products.length} products with images to migrate`);
+    
+    for (const product of products) {
+      // Migrate main image
+      if (product.image && product.image.startsWith('/uploads/')) {
+        const cloudinaryUrl = await uploadLocalImageToCloudinary(product.image, 'vitapharm/products');
+        if (cloudinaryUrl) {
+          product.image = cloudinaryUrl;
+          console.log(`Migrated product main image: ${product.name}`);
+        }
+      }
+
+      // Migrate gallery images
+      if (product.gallery && product.gallery.length > 0) {
+        const newGallery = [];
+        for (const galleryImage of product.gallery) {
+          if (galleryImage && galleryImage.startsWith('/uploads/')) {
+            const cloudinaryUrl = await uploadLocalImageToCloudinary(galleryImage, 'vitapharm/products/gallery');
+            if (cloudinaryUrl) {
+              newGallery.push(cloudinaryUrl);
+              console.log(`Migrated product gallery image for: ${product.name}`);
+            } else {
+              newGallery.push(galleryImage);
+            }
+          } else {
+            newGallery.push(galleryImage);
+          }
+        }
+        product.gallery = newGallery;
+      }
+
+      await product.save();
+    }
+
+    console.log('Image migration completed successfully!');
+  } catch (error) {
+    console.error('Error during image migration:', error);
+  }
+};
+
+// Connexion MongoDB avec meilleure gestion d'erreur
+mongoose.connect(MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+.then(() => {
+  console.log('✅ MongoDB connecté avec succès');
+  console.log('🔗 Database:', 'biopharma.jk3ygej.mongodb.net/vitapharm');
+  
+  // Start migration after successful connection
+  setTimeout(() => {
+    migrateExistingImages();
+  }, 5000);
+})
+.catch(err => {
+  console.error('❌ Erreur connexion MongoDB:', err.message);
+  process.exit(1);
+});
+
+// Schémas MongoDB (unchanged)
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -337,6 +469,7 @@ app.post('/api/categories', auth, adminAuth, upload.single('image'), async (req,
   try {
     const categoryData = req.body;
     if (req.file) {
+      // Cloudinary returns the URL in req.file.path
       categoryData.image = req.file.path;
     }
     
@@ -522,8 +655,8 @@ app.post('/api/products', auth, adminAuth, upload.array('images', 5), async (req
     const productData = req.body;
     
     if (req.files && req.files.length > 0) {
-      productData.image = req.files[0].path; // Cloudinary URL
-      productData.gallery = req.files.map(file => file.path); // Cloudinary URLs
+      productData.image = req.files[0].path; // Main image
+      productData.gallery = req.files.map(file => file.path); // Gallery images
     }
     
     const product = new Product(productData);
@@ -541,8 +674,8 @@ app.put('/api/products/:id', auth, adminAuth, upload.array('images', 5), async (
     const updateData = req.body;
     
     if (req.files && req.files.length > 0) {
-      updateData.image = req.files[0].path; // Cloudinary URL
-      updateData.gallery = req.files.map(file => file.path); // Cloudinary URLs
+      updateData.image = req.files[0].path;
+      updateData.gallery = req.files.map(file => file.path);
     }
     
     const product = await Product.findByIdAndUpdate(req.params.id, updateData, { new: true });
@@ -981,6 +1114,30 @@ app.patch('/api/admin/reviews/:reviewId/status', auth, adminAuth, async (req, re
   }
 });
 
+// Migration endpoint (one-time use)
+app.post('/api/admin/migrate-images', auth, adminAuth, async (req, res) => {
+  try {
+    console.log('Starting manual image migration...');
+    await migrateExistingImages();
+    res.json({ message: 'Image migration completed successfully' });
+  } catch (error) {
+    console.error('Manual migration error:', error);
+    res.status(500).json({ error: 'Migration failed' });
+  }
+});
+
+// Cloudinary cleanup endpoint (optional)
+app.delete('/api/admin/cleanup-cloudinary', auth, adminAuth, async (req, res) => {
+  try {
+    // This would require storing public_ids in your database for proper cleanup
+    // For now, this is a placeholder
+    res.json({ message: 'Cleanup functionality would require storing public_ids' });
+  } catch (error) {
+    console.error('Cleanup error:', error);
+    res.status(500).json({ error: 'Cleanup failed' });
+  }
+});
+
 // Créer un admin par défaut au démarrage
 const createDefaultAdmin = async () => {
   try {
@@ -1027,7 +1184,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🔗 Port: ${PORT}`);
   console.log(`🌐 URL: http://localhost:${PORT}`);
   console.log(`📡 API: http://localhost:${PORT}/api`);
-
+  console.log(`☁️  Storage: Cloudinary`);
   console.log('==========================================\n');
   createDefaultAdmin();
 });
